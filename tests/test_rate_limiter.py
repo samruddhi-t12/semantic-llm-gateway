@@ -1,28 +1,38 @@
 import pytest
-import asyncio
+from fastapi import FastAPI, Depends
+from fastapi.testclient import TestClient
 import redis.asyncio as aioredis
 from src.api.dependencies import verify_rate_limit
-from fastapi import HTTPException, Request
 
-@pytest.mark.asyncio
-async def test_rate_limiter_allows_and_blocks():
-    # Connect to the temporary Redis service running in the GitHub runner
-    redis_client = aioredis.from_url("redis://localhost:6379/0", decode_responses=True)
-    
-    # Clean state for testing
-    await redis_client.flushdb()
-    
-    # Mock the FastAPI Request object to pass a client host
-    class MockRequest:
-        def __init__(self, host):
-            self.client = type('Client', (), {'host': host})
-            self.app = type('App', (), {'state': type('State', (), {'redis': redis_client})})
-            
-    request = MockRequest(host="127.0.0.1")
-    
-    # Since our system configuration sets GLOBAL_RATE_LIMIT_PER_MIN, let's test execution
-    # First request should pass smoothly
-    client_id = await verify_rate_limit(request=request)
-    assert client_id == "127.0.0.1"
-    
-    await redis_client.close()
+# Create a minimal app to properly trigger FastAPI's dependency injection
+app = FastAPI()
+
+@app.on_event("startup")
+async def startup():
+    # Initialize Redis when the test app boots up
+    app.state.redis = aioredis.from_url("redis://localhost:6379/0", decode_responses=True)
+    await app.state.redis.flushdb()
+
+@app.on_event("shutdown")
+async def shutdown():
+    # Gracefully close Redis to prevent "Event loop is closed" errors
+    await app.state.redis.close()
+
+# Create a dummy route and attach the rate limiter dependency
+@app.get("/test")
+async def dummy_endpoint(client_id: str = Depends(verify_rate_limit)):
+    return {"client_id": client_id}
+
+def test_rate_limiter_allows_and_blocks():
+    # TestClient automatically triggers the startup and shutdown events
+    with TestClient(app) as client:
+        
+        # Send a request to the route. The dependency is now evaluated correctly.
+        response = client.get("/test")
+        
+        # 200 OK means the rate limit successfully allowed the first request
+        assert response.status_code == 200
+        
+        # FastAPI's TestClient mocks the incoming IP address as 'testclient'
+        assert response.json()["client_id"] == "testclient"
+```eof
