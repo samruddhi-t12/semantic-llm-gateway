@@ -35,4 +35,3 @@ def test_rate_limiter_allows_and_blocks():
         
         # FastAPI's TestClient mocks the incoming IP address as 'testclient'
         assert response.json()["client_id"] == "testclient"
-```eof
